@@ -354,7 +354,9 @@ KBUILD_CFLAGS   := -Wall -Wundef -Wstrict-prototypes -Wno-trigraphs \
 		   -fno-strict-aliasing -fno-common \
 		   -Werror-implicit-function-declaration \
 		   -Wno-format-security \
-		   -fno-delete-null-pointer-checks
+		   -fno-delete-null-pointer-checks \
+		   -Wno-unused-but-set-variable \
+		   -Wno-unitialised
 KBUILD_AFLAGS   := -D__ASSEMBLY__
 
 # Read KERNELRELEASE from include/config/kernel.release (if it exists)
@@ -572,7 +574,7 @@ endif
 
 # Force warning message as hard error
 ifdef CONFIG_FORCE_WARNING_AS_ERROR
-KBUILD_CFLAGS += -Werror
+KBUILD_CFLAGS += 
 endif
 
 # arch Makefile may override CC so keep this after arch Makefile is included
