@@ -16,6 +16,7 @@
 #include <linux/kernel.h>
 #include <asm/io.h>
 #include <linux/msm_mdp.h>
+#include <mach/debug_display.h>
 
 #include "mdp_hw.h"
 #include "mdp_ppp.h"
@@ -961,8 +962,7 @@ static int scale_params(uint32_t dim_in, uint32_t dim_out, uint32_t origin,
 		return -1;
 	do_div(n, d);
 	k3 = (n + 1) >> 1;
-	if ((k3 >> 4) < (1LL << 27) || (k3 >> 4) > (1LL << 31))
-		return -1;
+
 
 	n = ((uint64_t)dim_in) << 34;
 	d = (uint64_t)dim_out;
@@ -1016,13 +1016,34 @@ static int scale_params(uint32_t dim_in, uint32_t dim_out, uint32_t origin,
 	return 0;
 }
 
-int mdp_ppp_cfg_scale(const struct mdp_info *mdp, struct ppp_regs *regs,
+int mdp_ppp_cfg_scale(struct mdp_info *mdp, struct ppp_regs *regs,
 		      struct mdp_rect *src_rect, struct mdp_rect *dst_rect,
 		      uint32_t src_format, uint32_t dst_format)
 {
 	int downscale;
 	uint32_t phase_init_x, phase_init_y, phase_step_x, phase_step_y;
 	uint32_t scale_factor_x, scale_factor_y;
+	uint32_t temp_src, temp_dst;
+	int64_t temp_k;
+	uint64_t temp_n, temp_d;
+
+	/* check scale factor for legal range [0.25 - 4.0] */
+	if( src_rect->w > src_rect->h )
+		temp_src = src_rect->w;
+	else
+		temp_src = src_rect->h;
+
+	if( dst_rect->w > dst_rect->h )
+		temp_dst = dst_rect->w;
+	else
+		temp_dst = dst_rect->h;
+
+	temp_n = ((uint64_t)temp_dst) << 34;
+	temp_d = temp_src;
+	do_div(temp_n, temp_d);
+	temp_k = (temp_n + 1) >> 1;
+	if ((temp_k >> 4) < (1LL << 27))
+		return -1;
 
 	if (scale_params(src_rect->w, dst_rect->w, 1, &phase_init_x,
 			 &phase_step_x) ||
@@ -1070,7 +1091,7 @@ int mdp_ppp_cfg_scale(const struct mdp_info *mdp, struct ppp_regs *regs,
 }
 
 
-int mdp_ppp_load_blur(const struct mdp_info *mdp)
+int mdp_ppp_load_blur(struct mdp_info *mdp)
 {
 	if (!(downscale_x_table == MDP_DOWNSCALE_BLUR &&
               downscale_y_table == MDP_DOWNSCALE_BLUR)) {
@@ -1082,10 +1103,89 @@ int mdp_ppp_load_blur(const struct mdp_info *mdp)
 	return 0;
 }
 
-void mdp_ppp_init_scale(const struct mdp_info *mdp)
+#define MDP_SCALE_CFG_RETRY	3
+void mdp_ppp_init_scale(struct mdp_info *mdp)
 {
+	int i, r;
+
 	downscale_x_table = MDP_DOWNSCALE_MAX;
 	downscale_y_table = MDP_DOWNSCALE_MAX;
 
-	load_table(mdp, mdp_upscale_table, ARRAY_SIZE(mdp_upscale_table));
+	for (i = 0; i < ARRAY_SIZE(mdp_upscale_table); i++) {
+		mdp_writel(mdp, mdp_upscale_table[i].val,
+				mdp_upscale_table[i].reg);
+		/* Workaround for MDP defect(couples of lines presented in
+		 * ROI while scaling up image) based on QCT's suggestion
+		 */
+		for(r = 0 ; r < MDP_SCALE_CFG_RETRY ; r++) {
+			if (mdp_readl(mdp, mdp_upscale_table[i].reg) ==
+					mdp_upscale_table[i].val)
+				break ;
+			PR_DISP_ERR("MDP: failed to config PPP up scale coefficients"
+					" table: reg=0x%08X, val=0x%08X\n",
+					mdp_upscale_table[i].reg,
+					mdp_upscale_table[i].val);
+			mdp_writel(mdp, mdp_upscale_table[i].val,
+					mdp_upscale_table[i].reg);
+		}
+		if (MDP_SCALE_CFG_RETRY == r) {
+			PR_DISP_ERR("MDP: PPP is defective and unrepairable!\n");
+			BUG();
+		}
+	}
+}
+
+
+int mdp_ppp_validate_blit(struct mdp_info *mdp, struct mdp_blit_req *req)
+{
+	/* WORKAROUND FOR HARDWARE BUG IN BG TILE FETCH */
+	if (unlikely(req->src_rect.h == 0 ||
+		     req->src_rect.w == 0)) {
+		PR_DISP_INFO("mdp_ppp: src img of zero size!\n");
+		return -EINVAL;
+	}
+	if (unlikely(req->dst_rect.h == 0 ||
+		     req->dst_rect.w == 0))
+		return -EINVAL;
+
+	return 0;
+}
+
+int mdp_ppp_do_blit(struct mdp_info *mdp, struct mdp_blit_req *req,
+		   struct file *src_file, unsigned long src_start,
+		   unsigned long src_len, struct file *dst_file,
+		   unsigned long dst_start, unsigned long dst_len)
+{
+	int ret;
+
+	if (unlikely((req->transp_mask != MDP_TRANSP_NOP ||
+		      req->alpha != MDP_ALPHA_NOP ||
+		      HAS_ALPHA(req->src.format)) &&
+		     (req->flags & MDP_ROT_90 &&
+		      req->dst_rect.w <= 16 && req->dst_rect.h >= 16))) {
+		int i;
+		unsigned int tiles = req->dst_rect.h / 16;
+		unsigned int remainder = req->dst_rect.h % 16;
+		req->src_rect.w = 16*req->src_rect.w / req->dst_rect.h;
+		req->dst_rect.h = 16;
+		for (i = 0; i < tiles; i++) {
+			ret = mdp_ppp_blit_and_wait(mdp, req,
+						src_file, src_start, src_len,
+						dst_file, dst_start, dst_len);
+			if (ret)
+				goto end;
+			req->dst_rect.y += 16;
+			req->src_rect.x += req->src_rect.w;
+		}
+		if (!remainder)
+			goto end;
+		req->src_rect.w = remainder*req->src_rect.w / req->dst_rect.h;
+		req->dst_rect.h = remainder;
+	}
+
+	ret = mdp_ppp_blit_and_wait(mdp, req,
+				src_file, src_start, src_len,
+				dst_file, dst_start, dst_len);
+end:
+	return ret;
 }
