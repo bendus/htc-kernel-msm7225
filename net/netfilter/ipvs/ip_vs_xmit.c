@@ -65,6 +65,15 @@ __ip_vs_dst_check(struct ip_vs_dest *dest, u32 rtos, u32 cookie)
 	return dst;
 }
 
+static inline bool
+__mtu_check_toobig_v6(const struct sk_buff *skb, u32 mtu)
+{
+	if (skb->len > mtu && !skb_is_gso(skb)) {
+		return true; /* Packet size violate MTU size */
+	}
+	return false;
+}
+
 static struct rtable *
 __ip_vs_get_out_rt(struct ip_vs_conn *cp, u32 rtos)
 {
@@ -311,7 +320,7 @@ ip_vs_bypass_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 
 	/* MTU checking */
 	mtu = dst_mtu(&rt->u.dst);
-	if (skb->len > mtu && !skb_is_gso(skb)) {
+	if (__mtu_check_toobig_v6(skb, mtu)) {
 		dst_release(&rt->u.dst);
 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		IP_VS_DBG_RL("%s(): frag needed\n", __func__);
@@ -454,7 +463,7 @@ ip_vs_nat_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 
 	/* MTU checking */
 	mtu = dst_mtu(&rt->u.dst);
-	if (skb->len > mtu && !skb_is_gso(skb)) {
+	if (__mtu_check_toobig_v6(skb, mtu)) {
 		dst_release(&rt->u.dst);
 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		IP_VS_DBG_RL_PKT(0, pp, skb, 0,
@@ -673,7 +682,8 @@ ip_vs_tunnel_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 	if (skb_dst(skb))
 		skb_dst(skb)->ops->update_pmtu(skb_dst(skb), mtu);
 
-	if (mtu < ntohs(old_iph->payload_len) + sizeof(struct ipv6hdr) && !skb_is_gso(skb)) {
+	/* MTU checking: Notice that 'mtu' have been adjusted before hand */
+	if (__mtu_check_toobig_v6(skb, mtu)) {
 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		dst_release(&rt->u.dst);
 		IP_VS_DBG_RL("%s(): frag needed\n", __func__);
@@ -815,7 +825,7 @@ ip_vs_dr_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 
 	/* MTU checking */
 	mtu = dst_mtu(&rt->u.dst);
-	if (skb->len > mtu) {
+	if (__mtu_check_toobig_v6(skb, mtu)) {
 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		dst_release(&rt->u.dst);
 		IP_VS_DBG_RL("%s(): frag needed\n", __func__);
@@ -965,7 +975,7 @@ ip_vs_icmp_xmit_v6(struct sk_buff *skb, struct ip_vs_conn *cp,
 
 	/* MTU checking */
 	mtu = dst_mtu(&rt->u.dst);
-	if (skb->len > mtu && !skb_is_gso(skb)) {
+	if (__mtu_check_toobig_v6(skb, mtu)) {
 		dst_release(&rt->u.dst);
 		icmpv6_send(skb, ICMPV6_PKT_TOOBIG, 0, mtu);
 		IP_VS_DBG_RL("%s(): frag needed\n", __func__);
