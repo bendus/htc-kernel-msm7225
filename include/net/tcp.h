@@ -325,6 +325,8 @@ extern ssize_t			tcp_sendpage(struct socket *sock, struct page *page, int offset
 
 extern void			tcp_release_cb(struct sock *sk);
 
+extern void			tcp_wfree(struct sk_buff *skb);
+
 extern int			tcp_ioctl(struct sock *sk, 
 					  int cmd, 
 					  unsigned long arg);
